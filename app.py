@@ -62,7 +62,7 @@ def get_qa_chain(vectorstore):
     
     retriever = vectorstore.as_retriever(score_threshold=0.7)
     
-    prompt_template = """Given the following context and a question, generate a concise and relevant answer based primarily on the "response" section in the source document context.
+    prompt_template = """Given the following context and a question, generate a concise and relevant answer based primarily based on the source document context.
 If the question is a greeting (like "hi", "hello", "hey"), respond politely but briefly.
 If the question is outside the scope of the context or no relevant information is found, politely say that you don't have the information but you are here to help.
 Keep your answer short and to the point.
@@ -85,6 +85,7 @@ QUESTION: {question}"""
     )
     
     return rag_chain
+
 
 
 
