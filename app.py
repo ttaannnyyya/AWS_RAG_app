@@ -12,68 +12,92 @@ from langchain.prompts import PromptTemplate
 from langchain.schema.runnable import RunnablePassthrough
 from langchain.schema.output_parser import StrOutputParser
 
-# Load environment variables from .env file
 load_dotenv()
 
-# --- AWS Configuration ---
-# These credentials will be loaded from your .env file
+# --- AWS CONFIG ---
 aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
 aws_region = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 
-# --- CORE FUNCTIONS ---
+# --- AWS CLIENTS ---
+s3_client = boto3.client(
+    "s3",
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    region_name=aws_region
+)
 
-def get_pdf_text(pdf_docs):
-    """Extracts text from a list of uploaded PDF files."""
+bedrock_client = boto3.client(
+    service_name="bedrock-runtime",
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    region_name=aws_region
+)
+
+# ---------- S3 FUNCTIONS ----------
+
+def upload_pdf_to_s3(pdf_file):
+    """Uploads PDF to S3 and returns S3 key"""
+    s3_key = f"uploads/{pdf_file.name}"
+    s3_client.upload_fileobj(pdf_file, S3_BUCKET_NAME, s3_key)
+    return s3_key
+
+
+def get_pdf_text_from_s3(s3_keys):
+    """Reads PDFs from S3 and extracts text"""
     text = ""
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
+
+    for key in s3_keys:
+        obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=key)
+        pdf_reader = PdfReader(obj["Body"])
+
         for page in pdf_reader.pages:
             text += page.extract_text()
+
     return text
 
+
+# ---------- RAG FUNCTIONS ----------
+
 def get_text_chunks(text):
-    """Splits text into smaller, manageable chunks."""
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, chunk_overlap=200, length_function=len
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
     )
     return text_splitter.split_text(text)
 
+
 def get_vectorstore(text_chunks):
-    """Creates a FAISS vector store from text chunks and Bedrock embeddings."""
-    bedrock_client = boto3.client(
-        service_name="bedrock-runtime", region_name=aws_region,
-        aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key
+    embeddings = BedrockEmbeddings(
+        model_id="amazon.titan-embed-text-v1",
+        client=bedrock_client
     )
-    bedrock_embeddings = BedrockEmbeddings(
-        model_id="amazon.titan-embed-text-v1", client=bedrock_client
-    )
-    return FAISS.from_texts(texts=text_chunks, embedding=bedrock_embeddings)
+    return FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+
 
 def get_qa_chain(vectorstore):
-    """Creates a Question-Answering chain using the provided vector store."""
     llm = Bedrock(
-        client=boto3.client(
-            service_name="bedrock-runtime", region_name=aws_region,
-            aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_access_key
-        ),
-        model_id="anthropic.claude-v2"
+        model_id="anthropic.claude-v2",
+        client=bedrock_client
     )
-    
-    retriever = vectorstore.as_retriever(score_threshold=0.7)
-    
-    prompt_template = """Given the following context and a question, generate a concise and relevant answer based primarily based on the source document context.
-If the question is a greeting (like "hi", "hello", "hey"), respond politely but briefly.
-If the question is outside the scope of the context or no relevant information is found, politely say that you don't have the information but you are here to help.
-Keep your answer short and to the point.
-CONTEXT: {context}
 
-QUESTION: {question}"""
+    retriever = vectorstore.as_retriever(
+        search_type="mmr",
+        search_kwargs={"k": 4, "fetch_k": 8}
+    )
+
+    prompt_template = """Given the following context and a question, generate a concise and relevant answer based primarily
+      on the "response" section in the source document context. If the question is a greeting (like "hi", "hello", "hey"), respond politely but briefly. If the question is outside the scope of the context or no relevant information is found,
+      politely say that you don't have the information but you are here to help. Keep your answer short and to the point. 
+      CONTEXT: {context} QUESTION: {question}"""
 
     PROMPT = PromptTemplate(
-        template=prompt_template, input_variables=["context", "question"]
+        template=prompt_template,
+        input_variables=["context", "question"]
     )
-    
+
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
@@ -83,8 +107,9 @@ QUESTION: {question}"""
         | llm
         | StrOutputParser()
     )
-    
+
     return rag_chain
+
 
 
 
